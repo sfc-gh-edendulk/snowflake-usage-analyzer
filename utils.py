@@ -62,16 +62,19 @@ def resolve_customer(search_term):
     safe_term = search_term.replace("'", "''")
     try:
         return execute_query(f"""
-            SELECT DISTINCT
+            SELECT
                 ID as SALESFORCE_ACCOUNT_ID,
                 NAME,
                 INDUSTRY,
-                TYPE as TYPE,
+                TYPE,
                 BILLING_COUNTRY
             FROM FIVETRAN.SALESFORCE.ACCOUNT
-            WHERE LOWER(NAME) LIKE LOWER('%{safe_term}%')
+            WHERE NAME ILIKE '%{safe_term}%'
               AND IS_DELETED = FALSE
-            ORDER BY NAME
+              AND TYPE IN ('Customer', 'Prospect', 'Former Customer')
+            ORDER BY
+              CASE TYPE WHEN 'Customer' THEN 0 WHEN 'Former Customer' THEN 1 ELSE 2 END,
+              NAME
             LIMIT 10
         """)
     except:
@@ -293,7 +296,13 @@ CREATE OR REPLACE VIEW TEMP.EDENDULK.{view_name} AS (
 def create_query_history_view(view_name, accounts, date_start, date_end):
     sql = build_query_history_view_sql(view_name, accounts, date_start, date_end)
     try:
+        execute_query("USE WAREHOUSE SE_WH")
         execute_query(sql)
+        execute_query("USE WAREHOUSE SNOWADHOC")
         return True, None
     except Exception as e:
+        try:
+            execute_query("USE WAREHOUSE SNOWADHOC")
+        except:
+            pass
         return False, str(e)

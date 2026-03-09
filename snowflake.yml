@@ -7,7 +7,7 @@ entities:
       schema: EDENDULK
       database: TEMP
     title: "Snowflake Usage Analyzer"
-    query_warehouse: SE_WH
+    query_warehouse: SNOWADHOC
     main_file: streamlit_app.py
     pages_dir: app_pages/
     artifacts:

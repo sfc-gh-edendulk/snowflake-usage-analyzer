@@ -6,6 +6,20 @@ from utils import (
 )
 from data import load_summary_stats, get_warehouses, get_users
 
+
+@st.cache_data(ttl=600)
+def get_existing_view_customers():
+    try:
+        return execute_query("""
+            SELECT DISTINCT REPLACE(TABLE_NAME, '_QUERY_HISTORY_V', '') as CUSTOMER
+            FROM TEMP.INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = 'EDENDULK' AND TABLE_NAME LIKE '%_QUERY_HISTORY_V'
+            ORDER BY CUSTOMER
+        """)
+    except:
+        return None
+
+
 st.set_page_config(
     page_title="Customer Usage Analyzer",
     page_icon=":material/analytics:",
@@ -64,8 +78,6 @@ if not st.session_state.customer_name:
                     st.session_state.customer_name = row['NAME']
                     st.session_state.salesforce_account_id = row['SALESFORCE_ACCOUNT_ID']
                     st.session_state.accounts_confirmed = False
-                    sf_accounts = get_snowflake_accounts_for_sfdc(row['SALESFORCE_ACCOUNT_ID'])
-                    st.session_state.snowflake_accounts = sf_accounts
                     views = discover_customer_views(row['NAME'])
                     st.session_state.available_views = views
                     st.session_state.query_history_view = views.get('QUERY_HISTORY_V')
@@ -74,12 +86,7 @@ if not st.session_state.customer_name:
             st.warning("No matching customers found. Try a different search term.", icon=":material/search_off:")
 
     st.divider()
-    existing_views = execute_query("""
-        SELECT DISTINCT REPLACE(TABLE_NAME, '_QUERY_HISTORY_V', '') as CUSTOMER
-        FROM TEMP.INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_SCHEMA = 'EDENDULK' AND TABLE_NAME LIKE '%_QUERY_HISTORY_V'
-        ORDER BY CUSTOMER
-    """)
+    existing_views = get_existing_view_customers()
     if existing_views is not None and not existing_views.empty:
         st.subheader(":material/view_list: Customers with Query History Views")
         st.caption("These customers have pre-built query history views for detailed performance analysis.")
@@ -87,25 +94,27 @@ if not st.session_state.customer_name:
         for i, name in enumerate(existing_views['CUSTOMER'].tolist()):
             with cols[i % 4]:
                 if st.button(name, key=f"quick_{name}", use_container_width=True):
-                    matches = resolve_customer(name)
-                    if matches is not None and not matches.empty:
-                        row = matches.iloc[0]
-                        st.session_state.customer_name = row['NAME']
-                        st.session_state.salesforce_account_id = row['SALESFORCE_ACCOUNT_ID']
-                        sf_accounts = get_snowflake_accounts_for_sfdc(row['SALESFORCE_ACCOUNT_ID'])
-                        st.session_state.snowflake_accounts = sf_accounts
-                    else:
-                        st.session_state.customer_name = name
-                        st.session_state.salesforce_account_id = None
-                        st.session_state.snowflake_accounts = None
-
                     views = discover_customer_views(name)
                     st.session_state.available_views = views
                     st.session_state.query_history_view = views.get('QUERY_HISTORY_V')
+                    st.session_state.customer_name = name
                     st.session_state.accounts_confirmed = True
                     st.rerun()
 
     st.stop()
+
+if st.session_state.salesforce_account_id and st.session_state.snowflake_accounts is None:
+    with st.spinner("Loading Snowflake accounts..."):
+        sf_accounts = get_snowflake_accounts_for_sfdc(st.session_state.salesforce_account_id)
+        st.session_state.snowflake_accounts = sf_accounts
+
+if st.session_state.customer_name and not st.session_state.salesforce_account_id:
+    matches = resolve_customer(st.session_state.customer_name)
+    if matches is not None and not matches.empty:
+        row = matches.iloc[0]
+        st.session_state.salesforce_account_id = row['SALESFORCE_ACCOUNT_ID']
+        sf_accounts = get_snowflake_accounts_for_sfdc(row['SALESFORCE_ACCOUNT_ID'])
+        st.session_state.snowflake_accounts = sf_accounts
 
 sf_accounts = st.session_state.snowflake_accounts
 has_multiple_accounts = sf_accounts is not None and not sf_accounts.empty and len(sf_accounts) > 1
