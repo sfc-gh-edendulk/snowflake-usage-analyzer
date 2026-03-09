@@ -10,7 +10,7 @@ entities:
     query_warehouse: SE_WH
     main_file: streamlit_app.py
     pages_dir: app_pages/
-    additional_source_files:
+    artifacts:
       - utils.py
       - data.py
       - environment.yml
