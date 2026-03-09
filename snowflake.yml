@@ -1,0 +1,16 @@
+definition_version: 2
+entities:
+  customer_usage_app:
+    type: streamlit
+    identifier:
+      name: CUSTOMER_USAGE_APP
+      schema: EDENDULK
+      database: TEMP
+    title: "Snowflake Usage Analyzer"
+    query_warehouse: SE_WH
+    main_file: streamlit_app.py
+    pages_dir: app_pages/
+    additional_source_files:
+      - utils.py
+      - data.py
+      - environment.yml
