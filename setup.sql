@@ -1,0 +1,24 @@
+-- Snowflake Usage Analyzer - Setup Script
+-- Run these commands as ACCOUNTADMIN to grant necessary permissions
+
+-- Option A: Grant to an existing role
+USE ROLE ACCOUNTADMIN;
+GRANT IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE TO ROLE <your_role>;
+
+-- Option B: Create a dedicated role for the app
+USE ROLE ACCOUNTADMIN;
+
+CREATE ROLE IF NOT EXISTS USAGE_ANALYZER_ROLE;
+GRANT IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE TO ROLE USAGE_ANALYZER_ROLE;
+
+-- Grant the role to users who need access
+GRANT ROLE USAGE_ANALYZER_ROLE TO USER <your_user>;
+
+-- Optional: Create warehouse for the app
+CREATE WAREHOUSE IF NOT EXISTS USAGE_ANALYZER_WH
+  WAREHOUSE_SIZE = 'X-SMALL'
+  AUTO_SUSPEND = 60
+  AUTO_RESUME = TRUE
+  INITIALLY_SUSPENDED = TRUE;
+
+GRANT USAGE ON WAREHOUSE USAGE_ANALYZER_WH TO ROLE USAGE_ANALYZER_ROLE;
