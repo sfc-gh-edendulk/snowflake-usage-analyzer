@@ -4,7 +4,7 @@ from utils import execute_query
 
 
 @st.cache_data(ttl=300)
-def load_summary_stats(start, end, warehouse_filter, user_filter):
+def load_summary_stats(start, end, warehouse_filter, user_filter, source):
     where = f"start_time >= '{start}' AND start_time <= '{end}'"
     if warehouse_filter:
         where += f" AND warehouse_name = '{warehouse_filter}'"
@@ -24,18 +24,19 @@ def load_summary_stats(start, end, warehouse_filter, user_filter):
             AVG(percentage_scanned_from_cache) as avg_cache_hit,
             SUM(credits_used_cloud_services) as total_cloud_credits,
             SUM(total_elapsed_time)/1000/60/60 as total_hours
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
     """)
 
 
 @st.cache_data(ttl=600)
-def get_warehouses():
+def get_warehouses(start, end, source):
     try:
-        df = execute_query("""
+        df = execute_query(f"""
             SELECT DISTINCT warehouse_name 
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY 
-            WHERE warehouse_name IS NOT NULL 
+            FROM {source}
+            WHERE warehouse_name IS NOT NULL
+            AND start_time >= '{start}' AND start_time <= '{end}'
             ORDER BY warehouse_name
             LIMIT 100
         """)
@@ -45,12 +46,13 @@ def get_warehouses():
 
 
 @st.cache_data(ttl=600)
-def get_users():
+def get_users(start, end, source):
     try:
-        df = execute_query("""
+        df = execute_query(f"""
             SELECT DISTINCT user_name 
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY 
-            WHERE user_name IS NOT NULL 
+            FROM {source}
+            WHERE user_name IS NOT NULL
+            AND start_time >= '{start}' AND start_time <= '{end}'
             ORDER BY user_name
             LIMIT 100
         """)
@@ -59,10 +61,8 @@ def get_users():
         return ["All"]
 
 
-# --- Query Performance ---
-
 @st.cache_data(ttl=300)
-def get_pruning_data(where):
+def get_pruning_data(where, source):
     return execute_query(f"""
         SELECT 
             query_id,
@@ -77,7 +77,7 @@ def get_pruning_data(where):
             execution_time,
             total_elapsed_time,
             bytes_scanned
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         AND partitions_total > 0
@@ -88,7 +88,7 @@ def get_pruning_data(where):
 
 
 @st.cache_data(ttl=300)
-def get_spilling_data(where):
+def get_spilling_data(where, source):
     return execute_query(f"""
         WITH stats AS (
             SELECT 
@@ -98,7 +98,7 @@ def get_spilling_data(where):
                 SUM(total_elapsed_time) as total_time,
                 SUM(bytes_spilled_to_local_storage)/1e9 as local_spill_gb,
                 SUM(bytes_spilled_to_remote_storage)/1e9 as remote_spill_gb
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            FROM {source}
             WHERE {where}
             AND execution_status = 'SUCCESS'
         )
@@ -114,14 +114,14 @@ def get_spilling_data(where):
 
 
 @st.cache_data(ttl=300)
-def get_cache_data(where):
+def get_cache_data(where, source):
     return execute_query(f"""
         SELECT 
             DATE_TRUNC('day', start_time) as day,
             AVG(percentage_scanned_from_cache) as avg_cache_hit,
             SUM(bytes_scanned)/1e9 as total_scanned_gb,
             SUM(bytes_scanned * percentage_scanned_from_cache)/1e9 as cached_gb
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         GROUP BY DATE_TRUNC('day', start_time)
@@ -130,7 +130,7 @@ def get_cache_data(where):
 
 
 @st.cache_data(ttl=300)
-def get_time_breakdown(where):
+def get_time_breakdown(where, source):
     return execute_query(f"""
         SELECT 
             COALESCE(SUM(compilation_time), 0)/1000/60/60 as compilation_hours,
@@ -139,16 +139,14 @@ def get_time_breakdown(where):
             COALESCE(SUM(queued_repair_time), 0)/1000/60/60 as queue_repair_hours,
             COALESCE(SUM(execution_time), 0)/1000/60/60 as execution_hours,
             COALESCE(SUM(transaction_blocked_time), 0)/1000/60/60 as blocked_hours
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
     """)
 
 
-# --- Warehouse Analysis ---
-
 @st.cache_data(ttl=300)
-def get_warehouse_summary(where):
+def get_warehouse_summary(where, source):
     return execute_query(f"""
         SELECT 
             warehouse_name,
@@ -164,7 +162,7 @@ def get_warehouse_summary(where):
             SUM(credits_used_cloud_services) as cloud_credits,
             SUM(queued_provisioning_time + queued_overload_time)/1000/60 as total_queue_min,
             SUM(bytes_spilled_to_local_storage + bytes_spilled_to_remote_storage)/1e9 as total_spill_gb
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         AND warehouse_name IS NOT NULL
@@ -174,7 +172,7 @@ def get_warehouse_summary(where):
 
 
 @st.cache_data(ttl=300)
-def get_sizing_analysis(where):
+def get_sizing_analysis(where, source):
     return execute_query(f"""
         SELECT 
             warehouse_name,
@@ -194,7 +192,7 @@ def get_sizing_analysis(where):
                 WHEN AVG(execution_time) < 5000 AND warehouse_size IN ('Large', 'X-Large', '2X-Large', '3X-Large', '4X-Large') THEN 'REVIEW - Fast Queries on Large WH'
                 ELSE 'OK'
             END as recommendation
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         AND warehouse_name IS NOT NULL
@@ -204,14 +202,14 @@ def get_sizing_analysis(where):
 
 
 @st.cache_data(ttl=300)
-def get_hourly_pattern(where):
+def get_hourly_pattern(where, source):
     return execute_query(f"""
         SELECT 
             EXTRACT(HOUR FROM start_time) as hour_of_day,
             EXTRACT(DAYOFWEEK FROM start_time) as day_of_week,
             COUNT(*) as query_count,
             AVG(execution_time)/1000 as avg_exec_sec
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         GROUP BY hour_of_day, day_of_week
@@ -219,7 +217,7 @@ def get_hourly_pattern(where):
 
 
 @st.cache_data(ttl=300)
-def get_cluster_data(where):
+def get_cluster_data(where, source):
     return execute_query(f"""
         SELECT 
             warehouse_name,
@@ -228,7 +226,7 @@ def get_cluster_data(where):
             COUNT(*) as query_count,
             AVG(execution_time)/1000 as avg_exec_sec,
             SUM(queued_overload_time)/1000 as total_queue_sec
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         AND cluster_number IS NOT NULL
@@ -237,10 +235,8 @@ def get_cluster_data(where):
     """)
 
 
-# --- Users & Features ---
-
 @st.cache_data(ttl=300)
-def get_user_stats(where):
+def get_user_stats(where, source):
     return execute_query(f"""
         SELECT 
             user_name,
@@ -252,7 +248,7 @@ def get_user_stats(where):
             COUNT(DISTINCT warehouse_name) as warehouses_used,
             COUNT(DISTINCT role_name) as roles_used,
             SUM(bytes_spilled_to_local_storage + bytes_spilled_to_remote_storage)/1e9 as spill_gb
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         GROUP BY user_name
@@ -261,7 +257,7 @@ def get_user_stats(where):
 
 
 @st.cache_data(ttl=300)
-def get_role_stats(where):
+def get_role_stats(where, source):
     return execute_query(f"""
         SELECT 
             role_name,
@@ -271,7 +267,7 @@ def get_role_stats(where):
             COUNT(DISTINCT warehouse_name) as warehouses_used,
             COUNT(DISTINCT database_name) as databases_accessed,
             SUM(bytes_scanned)/1e12 as tb_scanned
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         GROUP BY role_name
@@ -280,7 +276,7 @@ def get_role_stats(where):
 
 
 @st.cache_data(ttl=300)
-def get_query_types(where):
+def get_query_types(where, source):
     return execute_query(f"""
         SELECT 
             query_type,
@@ -289,7 +285,7 @@ def get_query_types(where):
             AVG(execution_time)/1000 as avg_exec_sec,
             SUM(bytes_scanned)/1e12 as tb_scanned,
             SUM(rows_inserted + rows_updated + rows_deleted) as rows_modified
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         GROUP BY query_type
@@ -298,14 +294,14 @@ def get_query_types(where):
 
 
 @st.cache_data(ttl=300)
-def get_feature_adoption(where):
+def get_feature_adoption(where, source):
     return execute_query(f"""
         SELECT 
             'External Functions' as feature,
             COUNT(CASE WHEN external_function_total_invocations > 0 THEN 1 END) as queries_using,
             COUNT(*) as total_queries,
             SUM(external_function_total_invocations) as total_invocations
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         
@@ -316,7 +312,7 @@ def get_feature_adoption(where):
             COUNT(CASE WHEN outbound_data_transfer_bytes > 0 THEN 1 END) as queries_using,
             COUNT(*) as total_queries,
             SUM(outbound_data_transfer_bytes)/1e9 as total_invocations
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         
@@ -327,7 +323,7 @@ def get_feature_adoption(where):
             COUNT(CASE WHEN inbound_data_transfer_bytes > 0 THEN 1 END) as queries_using,
             COUNT(*) as total_queries,
             SUM(inbound_data_transfer_bytes)/1e9 as total_invocations
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         
@@ -338,29 +334,27 @@ def get_feature_adoption(where):
             COUNT(CASE WHEN query_tag IS NOT NULL AND query_tag != '' THEN 1 END) as queries_using,
             COUNT(*) as total_queries,
             COUNT(DISTINCT query_tag) as total_invocations
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
     """)
 
 
-# --- Errors & Recommendations ---
-
 @st.cache_data(ttl=300)
-def get_error_summary(where):
+def get_error_summary(where, source):
     return execute_query(f"""
         SELECT 
             COUNT(*) as total_queries,
             SUM(CASE WHEN execution_status = 'SUCCESS' THEN 1 ELSE 0 END) as success,
             SUM(CASE WHEN execution_status = 'FAIL' THEN 1 ELSE 0 END) as failed,
             SUM(CASE WHEN execution_status = 'INCIDENT' THEN 1 ELSE 0 END) as incident
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
     """)
 
 
 @st.cache_data(ttl=300)
-def get_error_codes(where):
+def get_error_codes(where, source):
     return execute_query(f"""
         SELECT 
             error_code,
@@ -368,7 +362,7 @@ def get_error_codes(where):
             COUNT(*) as error_count,
             COUNT(DISTINCT user_name) as affected_users,
             COUNT(DISTINCT warehouse_name) as warehouses
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'FAIL'
         AND error_code IS NOT NULL
@@ -379,7 +373,7 @@ def get_error_codes(where):
 
 
 @st.cache_data(ttl=300)
-def get_long_queries(where, threshold_ms):
+def get_long_queries(where, threshold_ms, source):
     return execute_query(f"""
         SELECT 
             query_id,
@@ -397,7 +391,7 @@ def get_long_queries(where, threshold_ms):
             bytes_spilled_to_local_storage/1e9 as local_spill_gb,
             CASE WHEN partitions_total > 0 THEN partitions_scanned::float/partitions_total ELSE NULL END as pruning_ratio,
             query_text
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         AND execution_time > {threshold_ms}
@@ -407,7 +401,7 @@ def get_long_queries(where, threshold_ms):
 
 
 @st.cache_data(ttl=300)
-def generate_recommendations(where):
+def generate_recommendations(where, source):
     recs = []
 
     spill_check = execute_query(f"""
@@ -416,7 +410,7 @@ def generate_recommendations(where):
             warehouse_size,
             SUM(bytes_spilled_to_local_storage + bytes_spilled_to_remote_storage)/1e9 as total_spill_gb,
             COUNT(*) as spilling_queries
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND (bytes_spilled_to_local_storage > 0 OR bytes_spilled_to_remote_storage > 0)
         GROUP BY warehouse_name, warehouse_size
@@ -439,7 +433,7 @@ def generate_recommendations(where):
             warehouse_size,
             SUM(queued_overload_time)/1000/60 as queue_min,
             COUNT(*) as queued_queries
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND queued_overload_time > 5000
         GROUP BY warehouse_name, warehouse_size
@@ -462,7 +456,7 @@ def generate_recommendations(where):
             COUNT(*) as query_count,
             AVG(CASE WHEN partitions_total > 0 THEN partitions_scanned::float/partitions_total END) as avg_pruning_ratio,
             SUM(bytes_scanned)/1e12 as tb_scanned
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         AND partitions_total > 100
@@ -486,7 +480,7 @@ def generate_recommendations(where):
             warehouse_name,
             AVG(percentage_scanned_from_cache) as avg_cache_hit,
             SUM(bytes_scanned)/1e12 as tb_scanned
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
         AND execution_status = 'SUCCESS'
         GROUP BY warehouse_name
@@ -508,7 +502,7 @@ def generate_recommendations(where):
         SELECT 
             COUNT(*) as total_queries,
             SUM(CASE WHEN query_tag IS NOT NULL AND query_tag != '' THEN 1 ELSE 0 END) as tagged_queries
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where}
     """)
 
@@ -534,168 +528,129 @@ def generate_recommendations(where):
     return pd.DataFrame(recs)
 
 
-# --- Cortex AI Usage ---
-
 @st.cache_data(ttl=300)
-def get_llm_usage(where):
+def get_ai_adoption_summary(sfdc_id, days=30):
+    safe_id = sfdc_id.replace("'", "''")
     return execute_query(f"""
-        SELECT 
-            query_type,
-            user_name,
-            COUNT(*) as query_count,
-            SUM(total_elapsed_time)/1000/60 as total_minutes,
-            AVG(execution_time)/1000 as avg_exec_sec
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-        WHERE {where}
-        AND execution_status = 'SUCCESS'
-        AND (
-            UPPER(query_text) LIKE '%SNOWFLAKE.CORTEX.COMPLETE%'
-            OR UPPER(query_text) LIKE '%SNOWFLAKE.CORTEX.SUMMARIZE%'
-            OR UPPER(query_text) LIKE '%SNOWFLAKE.CORTEX.TRANSLATE%'
-            OR UPPER(query_text) LIKE '%SNOWFLAKE.CORTEX.SENTIMENT%'
-            OR UPPER(query_text) LIKE '%SNOWFLAKE.CORTEX.EXTRACT_ANSWER%'
-            OR UPPER(query_text) LIKE '%SNOWFLAKE.ML.%'
-        )
-        GROUP BY query_type, user_name
-        ORDER BY query_count DESC
+        SELECT 'Cortex LLM' as FEATURE, MAX(CASE WHEN IS_CORTEX_LLM_USAGE THEN 'Yes' ELSE 'No' END) as IS_USING, COALESCE(SUM(CORTEX_LLM_CREDITS), 0) as TOTAL_CREDITS
+        FROM FINANCE.CUSTOMER.PRODUCT_CORTEX_LLM_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'Cortex ML', MAX(CASE WHEN IS_CORTEX_ML_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(CORTEX_ML_CREDITS), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_CORTEX_ML_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'Cortex Analyst', MAX(CASE WHEN IS_CORTEX_ANALYST_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(CORTEX_ANALYST_CREDITS), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_CORTEX_ANALYST_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'Cortex Search', MAX(CASE WHEN IS_CORTEX_SEARCH_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(CORTEX_SEARCH_CREDITS), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_CORTEX_SEARCH_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'SPCS GPU', MAX(CASE WHEN IS_SPCS_GPU_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(SPCS_GPU_CREDITS), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_SPCS_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'Document AI', MAX(CASE WHEN IS_DOCUMENT_AI_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(DOCUMENT_AI_CREDITS), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_DOCUMENT_AI_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'SnowML', MAX(CASE WHEN IS_SNOWML_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(SNOWML_CREDITS), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_SNOWML_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'Snowflake Intelligence', MAX(CASE WHEN IS_SNOWFLAKE_INTELLIGENCE_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(SNOWFLAKE_INTELLIGENCE_CREDITS), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_SNOWFLAKE_INTELLIGENCE_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
     """)
 
 
 @st.cache_data(ttl=300)
-def get_search_usage(where):
+def get_platform_adoption_summary(sfdc_id, days=30):
+    safe_id = sfdc_id.replace("'", "''")
     return execute_query(f"""
-        SELECT 
-            user_name,
-            COUNT(*) as query_count,
-            AVG(execution_time)/1000 as avg_exec_sec,
-            SUM(execution_time)/1000/60 as total_minutes
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-        WHERE {where}
-        AND execution_status = 'SUCCESS'
-        AND UPPER(query_text) LIKE '%CORTEX_SEARCH%'
-        GROUP BY user_name
-        ORDER BY query_count DESC
+        SELECT 'Dynamic Tables' as FEATURE, MAX(CASE WHEN IS_DYNAMIC_TABLES_USAGE THEN 'Yes' ELSE 'No' END) as IS_USING, COALESCE(SUM(DYNAMIC_TABLES_CREDITS), 0) as TOTAL_CREDITS
+        FROM FINANCE.CUSTOMER.PRODUCT_DYNAMIC_TABLES_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'Snowpark', MAX(CASE WHEN IS_SNOWPARK_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(SNOWPARK_CREDITS), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_SNOWPARK_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'Iceberg', MAX(CASE WHEN IS_ICEBERG_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(ICEBERG_TOTAL_RATED_CONSUMPTION), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_ICEBERG_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'Streamlit', MAX(CASE WHEN IS_STREAMLIT_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(SIS_CREDITS), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_SIS_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'Notebooks', MAX(CASE WHEN IS_NOTEBOOK_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(NOTEBOOK_CREDITS), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_NOTEBOOK_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        UNION ALL
+        SELECT 'Connectors', MAX(CASE WHEN IS_CONNECTOR_USAGE THEN 'Yes' ELSE 'No' END), COALESCE(SUM(CONNECTOR_CREDITS), 0)
+        FROM FINANCE.CUSTOMER.PRODUCT_CONNECTORS_ACCOUNT_REVENUE WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}' AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
     """)
 
 
 @st.cache_data(ttl=300)
-def get_analyst_usage(where):
+def get_cortex_llm_daily(sfdc_id, days=90):
+    safe_id = sfdc_id.replace("'", "''")
     return execute_query(f"""
         SELECT 
-            user_name,
-            COUNT(*) as query_count,
-            AVG(execution_time)/1000 as avg_exec_sec,
-            SUM(execution_time)/1000/60 as total_minutes
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-        WHERE {where}
-        AND execution_status = 'SUCCESS'
-        AND (
-            UPPER(query_text) LIKE '%CORTEX.ANALYST%'
-            OR UPPER(query_text) LIKE '%SEMANTIC_MODEL%'
-        )
-        GROUP BY user_name
-        ORDER BY query_count DESC
+            GENERAL_DATE,
+            SUM(CORTEX_LLM_CREDITS) as CORTEX_LLM_CREDITS
+        FROM FINANCE.CUSTOMER.PRODUCT_CORTEX_LLM_ACCOUNT_REVENUE
+        WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}'
+          AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        GROUP BY GENERAL_DATE
+        ORDER BY GENERAL_DATE
     """)
 
 
 @st.cache_data(ttl=300)
-def get_docai_usage(where):
+def get_cortex_llm_by_function(sfdc_id, days=90):
+    safe_id = sfdc_id.replace("'", "''")
     return execute_query(f"""
         SELECT 
-            user_name,
-            COUNT(*) as query_count,
-            AVG(execution_time)/1000 as avg_exec_sec
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-        WHERE {where}
-        AND execution_status = 'SUCCESS'
-        AND (
-            UPPER(query_text) LIKE '%DOCUMENT_AI%'
-            OR UPPER(query_text) LIKE '%PARSE_DOCUMENT%'
-            OR UPPER(query_text) LIKE '%CORTEX.EXTRACT%'
-        )
-        GROUP BY user_name
-        ORDER BY query_count DESC
+            LLM_FUNCTION,
+            SUM(LLM_FUNCTION_CREDITS) as CREDITS,
+            COUNT(DISTINCT GENERAL_DATE) as DAYS_USED
+        FROM FINANCE.CUSTOMER.PRODUCT_CORTEX_LLM_FUNCTION_ACCOUNT_REVENUE
+        WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}'
+          AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+        GROUP BY LLM_FUNCTION
+        ORDER BY CREDITS DESC
     """)
 
 
 @st.cache_data(ttl=300)
-def get_agent_usage(where):
+def get_revenue_trend(sfdc_id, days=180):
+    safe_id = sfdc_id.replace("'", "''")
     return execute_query(f"""
         SELECT 
-            user_name,
-            COUNT(*) as query_count,
-            AVG(execution_time)/1000 as avg_exec_sec,
-            SUM(execution_time)/1000/60 as total_minutes
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-        WHERE {where}
-        AND execution_status = 'SUCCESS'
-        AND (
-            UPPER(query_text) LIKE '%CORTEX.AGENT%'
-            OR UPPER(query_text) LIKE '%CORTEX_AGENT%'
-            OR UPPER(query_text) LIKE '%CREATE%AGENT%'
-            OR UPPER(query_text) LIKE '%SNOWFLAKE.CORTEX.INVOKE_AGENT%'
-        )
-        GROUP BY user_name
-        ORDER BY query_count DESC
+            DATE_TRUNC('month', GENERAL_DATE) as MONTH,
+            SUM(COMPUTE_CREDITS) as COMPUTE_CREDITS,
+            SUM(AI_SERVICES_CREDITS) as AI_SERVICES_CREDITS,
+            SUM(TOTAL_CREDITS) as TOTAL_CREDITS,
+            SUM(GAAP_REVENUE) as GAAP_REVENUE
+        FROM FINANCE.CUSTOMER.CONTRACT_REVENUE
+        WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}'
+          AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+          AND IS_FUTURE = FALSE
+        GROUP BY DATE_TRUNC('month', GENERAL_DATE)
+        ORDER BY MONTH
     """)
 
 
 @st.cache_data(ttl=300)
-def get_intelligence_usage(where):
+def get_credit_breakdown(sfdc_id, days=180):
+    safe_id = sfdc_id.replace("'", "''")
     return execute_query(f"""
         SELECT 
-            user_name,
-            COUNT(*) as query_count,
-            AVG(execution_time)/1000 as avg_exec_sec,
-            SUM(execution_time)/1000/60 as total_minutes
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-        WHERE {where}
-        AND execution_status = 'SUCCESS'
-        AND (
-            UPPER(query_text) LIKE '%SNOWFLAKE_INTELLIGENCE%'
-            OR UPPER(query_text) LIKE '%ASK_COPILOT%'
-            OR UPPER(query_text) LIKE '%COPILOT%'
-            OR query_tag LIKE '%intelligence%'
-            OR query_tag LIKE '%copilot%'
-            OR UPPER(query_text) LIKE '%CORTEX.ASK%'
-        )
-        GROUP BY user_name
-        ORDER BY query_count DESC
-    """)
-
-
-@st.cache_data(ttl=300)
-def get_ai_summary(where):
-    return execute_query(f"""
-        SELECT 
-            DATE_TRUNC('day', start_time) as day,
-            CASE 
-                WHEN UPPER(query_text) LIKE '%CORTEX.COMPLETE%' THEN 'LLM_COMPLETE'
-                WHEN UPPER(query_text) LIKE '%CORTEX.SUMMARIZE%' THEN 'LLM_SUMMARIZE'
-                WHEN UPPER(query_text) LIKE '%CORTEX.TRANSLATE%' THEN 'LLM_TRANSLATE'
-                WHEN UPPER(query_text) LIKE '%CORTEX.SENTIMENT%' THEN 'LLM_SENTIMENT'
-                WHEN UPPER(query_text) LIKE '%CORTEX_SEARCH%' THEN 'CORTEX_SEARCH'
-                WHEN UPPER(query_text) LIKE '%CORTEX.ANALYST%' OR UPPER(query_text) LIKE '%SEMANTIC_MODEL%' THEN 'CORTEX_ANALYST'
-                WHEN UPPER(query_text) LIKE '%DOCUMENT_AI%' OR UPPER(query_text) LIKE '%PARSE_DOCUMENT%' THEN 'DOCUMENT_AI'
-                WHEN UPPER(query_text) LIKE '%CORTEX.AGENT%' OR UPPER(query_text) LIKE '%INVOKE_AGENT%' THEN 'CORTEX_AGENTS'
-                WHEN UPPER(query_text) LIKE '%COPILOT%' OR UPPER(query_text) LIKE '%SNOWFLAKE_INTELLIGENCE%' THEN 'SNOWFLAKE_INTELLIGENCE'
-                ELSE 'OTHER_AI'
-            END as ai_feature,
-            COUNT(*) as query_count
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-        WHERE {where}
-        AND execution_status = 'SUCCESS'
-        AND (
-            UPPER(query_text) LIKE '%SNOWFLAKE.CORTEX.%'
-            OR UPPER(query_text) LIKE '%CORTEX_SEARCH%'
-            OR UPPER(query_text) LIKE '%SEMANTIC_MODEL%'
-            OR UPPER(query_text) LIKE '%DOCUMENT_AI%'
-            OR UPPER(query_text) LIKE '%PARSE_DOCUMENT%'
-            OR UPPER(query_text) LIKE '%CORTEX.AGENT%'
-            OR UPPER(query_text) LIKE '%INVOKE_AGENT%'
-            OR UPPER(query_text) LIKE '%COPILOT%'
-            OR UPPER(query_text) LIKE '%SNOWFLAKE_INTELLIGENCE%'
-        )
-        GROUP BY day, ai_feature
-        ORDER BY day
+            DATE_TRUNC('month', GENERAL_DATE) as MONTH,
+            SUM(COMPUTE_CREDITS) as COMPUTE,
+            SUM(CLOUD_SERVICES_CREDITS) as CLOUD_SERVICES,
+            SUM(SNOWPIPE_CREDITS) as SNOWPIPE,
+            SUM(RECLUSTERING_CREDITS) as RECLUSTERING,
+            SUM(MATERIALIZED_VIEW_CREDITS) as MATERIALIZED_VIEWS,
+            SUM(SEARCH_OPTIMIZATION_CREDITS) as SEARCH_OPTIMIZATION,
+            SUM(SERVERLESS_TASK_CREDITS) as SERVERLESS_TASKS,
+            SUM(AI_SERVICES_CREDITS) as AI_SERVICES,
+            SUM(TOTAL_CREDITS) as TOTAL
+        FROM FINANCE.CUSTOMER.CONTRACT_REVENUE
+        WHERE SALESFORCE_ACCOUNT_ID = '{safe_id}'
+          AND GENERAL_DATE >= DATEADD(day, -{days}, CURRENT_DATE())
+          AND IS_FUTURE = FALSE
+        GROUP BY DATE_TRUNC('month', GENERAL_DATE)
+        ORDER BY MONTH
     """)

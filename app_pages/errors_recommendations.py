@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from utils import execute_query, get_ai_suggestions, build_where_clause, to_pandas_native
+from utils import execute_query, get_ai_suggestions, build_where_clause, get_query_source, to_pandas_native
 from data import get_error_summary, get_error_codes, get_long_queries, generate_recommendations
 
 where_clause = build_where_clause()
+source = get_query_source()
 
 st.title(":material/build: Errors & Optimization Recommendations")
 
@@ -18,7 +19,7 @@ selected = st.segmented_control(
 if selected == ":material/error: Error Analysis":
     st.subheader("Failed Query Analysis")
 
-    error_summary = get_error_summary(where_clause)
+    error_summary = get_error_summary(where_clause, source)
 
     if not error_summary.empty:
         col1, col2, col3, col4 = st.columns(4)
@@ -29,7 +30,7 @@ if selected == ":material/error: Error Analysis":
         col3.metric("Failed", f"{failed:,}")
         col4.metric("Failure Rate", f"{(failed*100/(total or 1)):.2f}%")
 
-    error_codes = get_error_codes(where_clause)
+    error_codes = get_error_codes(where_clause, source)
 
     if not error_codes.empty:
         st.markdown("**Top error codes**")
@@ -46,7 +47,7 @@ if selected == ":material/error: Error Analysis":
             DATE_TRUNC('day', start_time) as day,
             execution_status,
             COUNT(*) as query_count
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where_clause}
         GROUP BY day, execution_status
         ORDER BY day
@@ -63,7 +64,7 @@ if selected == ":material/error: Error Analysis":
             user_name,
             COUNT(*) as failed_queries,
             COUNT(DISTINCT error_code) as unique_errors
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where_clause}
         AND execution_status = 'FAIL'
         GROUP BY user_name
@@ -79,7 +80,7 @@ if selected == ":material/error: Error Analysis":
                 error_stats = error_codes.to_string() if not error_codes.empty else "No error codes"
                 user_error_stats = user_errors.to_string()
 
-                prompt = """You are a Snowflake troubleshooting expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake troubleshooting expert analyzing query history data.
 Analyze these error patterns.
 
 RECOMMENDATIONS SHOULD INCLUDE:
@@ -87,7 +88,7 @@ RECOMMENDATIONS SHOULD INCLUDE:
 2. User training recommendations based on error patterns
 3. Query patterns that commonly fail and how to prevent them
 4. Permission/role issues causing failures
-5. Resource contention issues (warehouse sizing, concurrency limits)"""
+5. Resource contention issues"""
 
                 data_context = f"ERROR CODE DISTRIBUTION:\n{error_stats}\n\nERRORS BY USER:\n{user_error_stats}"
                 suggestions = get_ai_suggestions(prompt, data_context)
@@ -99,7 +100,7 @@ elif selected == ":material/timer: Long Running Queries":
 
     threshold_min = st.slider("Execution time threshold (minutes)", 1, 60, 5)
 
-    long_queries = get_long_queries(where_clause, threshold_min * 60 * 1000)
+    long_queries = get_long_queries(where_clause, threshold_min * 60 * 1000, source)
 
     if not long_queries.empty:
         st.info(f"Found {len(long_queries)} queries running longer than {threshold_min} minutes", icon=":material/info:")
@@ -128,15 +129,15 @@ elif selected == ":material/timer: Long Running Queries":
                 query_samples = long_queries[['WAREHOUSE_NAME', 'WAREHOUSE_SIZE', 'EXEC_SEC', 'GB_SCANNED',
                                               'LOCAL_SPILL_GB', 'PRUNING_RATIO', 'QUERY_TEXT']].head(10).to_string()
 
-                prompt = """You are a Snowflake query optimization expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake query optimization expert analyzing query history data.
 Analyze these long-running queries.
 
 RECOMMENDATIONS SHOULD INCLUDE:
-1. Query rewrite suggestions for common anti-patterns (Cartesian products, unnecessary subqueries)
-2. Index/clustering recommendations based on WHERE clause patterns
-3. Materialized view opportunities for repeated complex queries
+1. Query rewrite suggestions for common anti-patterns
+2. Index/clustering recommendations
+3. Materialized view opportunities
 4. Warehouse sizing vs query optimization trade-offs
-5. Incremental processing opportunities (streams/tasks, dynamic tables)"""
+5. Incremental processing opportunities"""
 
                 data_context = f"LONG-RUNNING QUERIES:\n{query_samples}"
                 suggestions = get_ai_suggestions(prompt, data_context)
@@ -148,7 +149,7 @@ RECOMMENDATIONS SHOULD INCLUDE:
 elif selected == ":material/lightbulb: Optimization Summary":
     st.subheader("Optimization Recommendations")
 
-    recs_df = generate_recommendations(where_clause)
+    recs_df = generate_recommendations(where_clause, source)
 
     high_priority = recs_df[recs_df['Priority'] == 'High']
     med_priority = recs_df[recs_df['Priority'] == 'Medium']
@@ -186,7 +187,7 @@ elif selected == ":material/lightbulb: Optimization Summary":
             AVG(percentage_scanned_from_cache) as avg_cache_hit,
             SUM(bytes_spilled_to_local_storage + bytes_spilled_to_remote_storage)/1e12 as tb_spilled,
             SUM(credits_used_cloud_services) as cloud_credits
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where_clause}
         AND execution_status = 'SUCCESS'
     """)
@@ -199,16 +200,15 @@ elif selected == ":material/lightbulb: Optimization Summary":
             recs_text = recs_df.to_string()
             stats_text = quick_stats.iloc[0].to_dict() if not quick_stats.empty else {}
 
-            prompt = """You are a Snowflake optimization expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
-Based on the recommendations generated and overall statistics,
-provide a prioritized action plan.
+            prompt = """You are a Snowflake optimization expert analyzing query history data.
+Based on the recommendations and overall statistics, provide a prioritized action plan.
 
 RECOMMENDATIONS SHOULD INCLUDE:
 1. Top 3-5 actions sorted by impact/effort ratio
 2. Estimated cost savings or performance improvements
-3. Dependencies between recommendations (what to do first)
+3. Dependencies between recommendations
 4. Quick wins that can be implemented immediately
-5. Long-term architectural improvements to consider"""
+5. Long-term architectural improvements"""
 
             data_context = f"AUTO-GENERATED RECOMMENDATIONS:\n{recs_text}\n\nOVERALL STATISTICS:\n{stats_text}"
             suggestions = get_ai_suggestions(prompt, data_context)

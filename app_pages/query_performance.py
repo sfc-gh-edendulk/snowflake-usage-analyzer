@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from utils import execute_query, get_ai_suggestions, build_where_clause, to_pandas_native
+from utils import execute_query, get_ai_suggestions, build_where_clause, get_query_source, to_pandas_native
 from data import get_pruning_data, get_spilling_data, get_cache_data, get_time_breakdown
 
 where_clause = build_where_clause()
+source = get_query_source()
 
 st.title(":material/bolt: Query Performance Analysis")
 
@@ -20,7 +21,7 @@ if selected == ":material/filter_alt: Pruning Efficiency":
     st.subheader("Partition Pruning Efficiency")
     st.caption("Poor pruning (ratio > 0.5) indicates missing or ineffective clustering keys.")
 
-    pruning_df = get_pruning_data(where_clause)
+    pruning_df = get_pruning_data(where_clause, source)
 
     if not pruning_df.empty:
         col1, col2, col3 = st.columns(3)
@@ -43,7 +44,7 @@ if selected == ":material/filter_alt: Pruning Efficiency":
                 AVG(CASE WHEN partitions_total > 0 THEN partitions_scanned::float / partitions_total END) as avg_pruning_ratio,
                 SUM(partitions_scanned) as total_partitions_scanned,
                 SUM(bytes_scanned)/1e9 as total_gb_scanned
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            FROM {source}
             WHERE {where_clause}
             AND execution_status = 'SUCCESS'
             AND partitions_total > 100
@@ -64,7 +65,7 @@ if selected == ":material/filter_alt: Pruning Efficiency":
                 worst_queries = poor_pruning[['DATABASE_NAME', 'SCHEMA_NAME', 'PRUNING_RATIO', 'QUERY_TEXT']].head(10).to_string()
                 table_stats = table_pruning.to_string() if not table_pruning.empty else "No table-level stats"
 
-                prompt = """You are a Snowflake performance expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake performance expert analyzing query history data.
 Analyze these queries with poor partition pruning.
 
 RECOMMENDATIONS SHOULD INCLUDE:
@@ -85,7 +86,7 @@ elif selected == ":material/memory: Spilling Analysis":
     st.subheader("Memory Spilling Analysis")
     st.caption("Spilling to local/remote storage indicates warehouse undersizing or inefficient queries.")
 
-    spill_stats = get_spilling_data(where_clause)
+    spill_stats = get_spilling_data(where_clause, source)
 
     if not spill_stats.empty:
         col1, col2, col3, col4 = st.columns(4)
@@ -107,7 +108,7 @@ elif selected == ":material/memory: Spilling Analysis":
                 SUM(bytes_spilled_to_local_storage)/1e9 as local_spill_gb,
                 SUM(bytes_spilled_to_remote_storage)/1e9 as remote_spill_gb,
                 AVG(execution_time)/1000 as avg_exec_sec
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            FROM {source}
             WHERE {where_clause}
             AND execution_status = 'SUCCESS'
             GROUP BY warehouse_name, warehouse_size
@@ -136,7 +137,7 @@ elif selected == ":material/memory: Spilling Analysis":
                 bytes_spilled_to_remote_storage/1e6 as remote_spill_mb,
                 execution_time/1000 as exec_sec,
                 query_text
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            FROM {source}
             WHERE {where_clause}
             AND (bytes_spilled_to_local_storage > 0 OR bytes_spilled_to_remote_storage > 0)
             ORDER BY bytes_spilled_to_local_storage + bytes_spilled_to_remote_storage DESC
@@ -149,12 +150,12 @@ elif selected == ":material/memory: Spilling Analysis":
                 wh_stats = spill_by_wh.to_string() if not spill_by_wh.empty else "No warehouse stats"
                 query_samples = spilling_queries[['WAREHOUSE_NAME', 'WAREHOUSE_SIZE', 'LOCAL_SPILL_MB', 'REMOTE_SPILL_MB', 'QUERY_TEXT']].head(10).to_string()
 
-                prompt = """You are a Snowflake performance expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake performance expert analyzing query history data.
 Analyze these queries with memory spilling issues.
 
 RECOMMENDATIONS SHOULD INCLUDE:
-1. Warehouse sizing recommendations based on spill patterns (local spill = might benefit from larger size, remote spill = definitely needs larger)
-2. Query optimizations to reduce memory pressure (avoid large sorts, optimize JOINs, use approximate functions)
+1. Warehouse sizing recommendations based on spill patterns
+2. Query optimizations to reduce memory pressure
 3. Identify patterns like DISTINCT, ORDER BY, GROUP BY on high-cardinality columns
 4. Suggest breaking up complex queries or using intermediate tables
 5. Consider multi-cluster warehouses for concurrent workloads"""
@@ -167,7 +168,7 @@ RECOMMENDATIONS SHOULD INCLUDE:
 elif selected == ":material/cached: Cache Utilization":
     st.subheader("Result Cache & Local Storage Cache")
 
-    cache_df = get_cache_data(where_clause)
+    cache_df = get_cache_data(where_clause, source)
 
     if not cache_df.empty:
         cache_plot = to_pandas_native(cache_df)
@@ -190,7 +191,7 @@ elif selected == ":material/cached: Cache Utilization":
                 COUNT(*) as query_count,
                 AVG(percentage_scanned_from_cache) as avg_cache_hit,
                 SUM(bytes_scanned)/1e9 as total_scanned_gb
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            FROM {source}
             WHERE {where_clause}
             AND execution_status = 'SUCCESS'
             GROUP BY warehouse_name
@@ -203,9 +204,8 @@ elif selected == ":material/cached: Cache Utilization":
         if st.button(":material/psychology: Get AI optimization suggestions", key="cache_ai"):
             with st.spinner("Analyzing cache patterns..."):
                 cache_stats = cache_by_wh.to_string() if not cache_by_wh.empty else "No cache stats"
-                daily_pattern = cache_plot.to_string() if not cache_df.empty else "No daily data"
 
-                prompt = """You are a Snowflake performance expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake performance expert analyzing query history data.
 Analyze these cache utilization patterns.
 
 RECOMMENDATIONS SHOULD INCLUDE:
@@ -215,7 +215,7 @@ RECOMMENDATIONS SHOULD INCLUDE:
 4. Identify if data freshness requirements allow for result cache usage
 5. Suggest clustering or materialized views for frequently accessed patterns"""
 
-                data_context = f"CACHE BY WAREHOUSE:\n{cache_stats}\n\nDAILY CACHE PATTERN:\n{daily_pattern}"
+                data_context = f"CACHE BY WAREHOUSE:\n{cache_stats}"
                 suggestions = get_ai_suggestions(prompt, data_context)
                 st.markdown("### :material/lightbulb: AI Recommendations")
                 st.markdown(suggestions)
@@ -224,7 +224,7 @@ elif selected == ":material/schedule: Time Breakdown":
     st.subheader("Query Time Breakdown")
     st.caption("Understanding where time is spent: compilation, queueing, execution.")
 
-    time_df = get_time_breakdown(where_clause)
+    time_df = get_time_breakdown(where_clause, source)
 
     if not time_df.empty:
         def _nz(x):
@@ -250,7 +250,6 @@ elif selected == ":material/schedule: Time Breakdown":
 
         with col2:
             st.dataframe(time_chart_df, use_container_width=True)
-
             total_queue = _nz(time_df['QUEUE_PROVISIONING_HOURS'].iloc[0]) + _nz(time_df['QUEUE_OVERLOAD_HOURS'].iloc[0])
             if total_queue > 1:
                 st.warning(f"{total_queue:.1f} hours spent in queues - consider warehouse sizing or auto-scaling.", icon=":material/warning:")
@@ -264,7 +263,7 @@ elif selected == ":material/schedule: Time Breakdown":
                 SUM(queued_provisioning_time)/1000/60 as queue_prov_min,
                 SUM(queued_overload_time)/1000/60 as queue_overload_min,
                 AVG(queued_provisioning_time + queued_overload_time)/1000 as avg_queue_sec
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            FROM {source}
             WHERE {where_clause}
             AND execution_status = 'SUCCESS'
             GROUP BY warehouse_name, warehouse_size
@@ -278,15 +277,15 @@ elif selected == ":material/schedule: Time Breakdown":
                 queue_stats = queue_by_wh.to_string() if not queue_by_wh.empty else "No queue stats"
                 time_breakdown = time_chart_df.to_string()
 
-                prompt = """You are a Snowflake performance expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake performance expert analyzing query history data.
 Analyze these query queueing and time breakdown patterns.
 
 RECOMMENDATIONS SHOULD INCLUDE:
-1. For high provisioning queue time: adjust auto-suspend/auto-resume settings, consider pre-warming
-2. For high overload queue time: enable multi-cluster warehouses, adjust scaling policies
-3. For high compilation time: identify complex queries, suggest materialized views or query simplification
-4. For high blocked time: identify transaction contention, suggest isolation level adjustments
-5. Recommend specific warehouse configurations (min/max clusters, scaling policy)"""
+1. For high provisioning queue time: adjust auto-suspend/auto-resume settings
+2. For high overload queue time: enable multi-cluster warehouses
+3. For high compilation time: identify complex queries, suggest materialized views
+4. For high blocked time: identify transaction contention
+5. Recommend specific warehouse configurations"""
 
                 data_context = f"TIME BREAKDOWN:\n{time_breakdown}\n\nQUEUE TIME BY WAREHOUSE:\n{queue_stats}"
                 suggestions = get_ai_suggestions(prompt, data_context)

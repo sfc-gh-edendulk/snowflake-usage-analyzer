@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from utils import execute_query, get_ai_suggestions, build_where_clause, to_pandas_native
+from utils import execute_query, get_ai_suggestions, build_where_clause, get_query_source, to_pandas_native
 from data import get_user_stats, get_role_stats, get_query_types, get_feature_adoption
 
 where_clause = build_where_clause()
+source = get_query_source()
 
 st.title(":material/group: Users, Roles & Feature Adoption")
 
@@ -18,7 +19,7 @@ selected = st.segmented_control(
 if selected == ":material/person: User Activity":
     st.subheader("User Activity Analysis")
 
-    user_df = get_user_stats(where_clause)
+    user_df = get_user_stats(where_clause, source)
 
     if not user_df.empty:
         user_plot = to_pandas_native(user_df)
@@ -49,7 +50,7 @@ if selected == ":material/person: User Activity":
                 DATE_TRUNC('day', start_time) as day,
                 COUNT(DISTINCT user_name) as active_users,
                 COUNT(*) as query_count
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            FROM {source}
             WHERE {where_clause}
             GROUP BY day
             ORDER BY day
@@ -63,15 +64,15 @@ if selected == ":material/person: User Activity":
             with st.spinner("Analyzing user patterns..."):
                 user_stats_str = user_plot.head(20).to_string()
 
-                prompt = """You are a Snowflake usage optimization expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake usage optimization expert analyzing query history data.
 Analyze these user activity patterns.
 
 RECOMMENDATIONS SHOULD INCLUDE:
-1. Identify power users who may benefit from dedicated warehouses or optimizations
+1. Identify power users who may benefit from dedicated warehouses
 2. Users with high spill ratios whose queries need optimization
 3. Opportunities for user training based on usage patterns
-4. Governance recommendations (users accessing too many resources)
-5. Cost attribution opportunities and chargeback recommendations"""
+4. Governance recommendations
+5. Cost attribution opportunities"""
 
                 data_context = f"USER ACTIVITY:\n{user_stats_str}"
                 suggestions = get_ai_suggestions(prompt, data_context)
@@ -81,7 +82,7 @@ RECOMMENDATIONS SHOULD INCLUDE:
 elif selected == ":material/admin_panel_settings: Role Analysis":
     st.subheader("Role Usage Analysis")
 
-    role_df = get_role_stats(where_clause)
+    role_df = get_role_stats(where_clause, source)
 
     if not role_df.empty:
         col1, col2 = st.columns(2)
@@ -103,7 +104,7 @@ elif selected == ":material/admin_panel_settings: Role Analysis":
                 role_name,
                 warehouse_name,
                 COUNT(*) as query_count
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            FROM {source}
             WHERE {where_clause}
             AND execution_status = 'SUCCESS'
             AND role_name IS NOT NULL
@@ -123,15 +124,15 @@ elif selected == ":material/admin_panel_settings: Role Analysis":
             with st.spinner("Analyzing role patterns..."):
                 role_stats_str = role_df.to_string()
 
-                prompt = """You are a Snowflake governance and RBAC expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake governance and RBAC expert analyzing query history data.
 Analyze these role usage patterns.
 
 RECOMMENDATIONS SHOULD INCLUDE:
-1. Role consolidation opportunities (similar access patterns, overlapping privileges)
-2. Identify overly permissive roles (accessing many databases/warehouses)
+1. Role consolidation opportunities
+2. Identify overly permissive roles
 3. Suggest role hierarchy improvements
-4. Warehouse access governance (too many roles using expensive warehouses)
-5. Least privilege principle violations and remediation steps"""
+4. Warehouse access governance
+5. Least privilege principle violations"""
 
                 data_context = f"ROLE USAGE:\n{role_stats_str}"
                 suggestions = get_ai_suggestions(prompt, data_context)
@@ -141,7 +142,7 @@ RECOMMENDATIONS SHOULD INCLUDE:
 elif selected == ":material/code: Query Types":
     st.subheader("Query Type Distribution")
 
-    qt_df = get_query_types(where_clause)
+    qt_df = get_query_types(where_clause, source)
 
     if not qt_df.empty:
         col1, col2 = st.columns(2)
@@ -163,7 +164,7 @@ elif selected == ":material/code: Query Types":
                 DATE_TRUNC('week', start_time) as week,
                 query_type,
                 COUNT(*) as query_count
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            FROM {source}
             WHERE {where_clause}
             AND execution_status = 'SUCCESS'
             GROUP BY week, query_type
@@ -181,11 +182,11 @@ elif selected == ":material/code: Query Types":
             with st.spinner("Analyzing query patterns..."):
                 qt_stats = qt_df.to_string()
 
-                prompt = """You are a Snowflake workload optimization expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake workload optimization expert analyzing query history data.
 Analyze these query type patterns.
 
 RECOMMENDATIONS SHOULD INCLUDE:
-1. Balance between read (SELECT) and write (INSERT/UPDATE/DELETE) workloads
+1. Balance between read and write workloads
 2. High DML activity that could benefit from MERGE or bulk operations
 3. ETL patterns that could use streams/tasks or dynamic tables
 4. Query workloads that could benefit from materialized views
@@ -199,7 +200,7 @@ RECOMMENDATIONS SHOULD INCLUDE:
 elif selected == ":material/extension: Feature Adoption":
     st.subheader("Feature Adoption Analysis")
 
-    feature_df = get_feature_adoption(where_clause)
+    feature_df = get_feature_adoption(where_clause, source)
 
     if not feature_df.empty:
         feature_df['ADOPTION_PCT'] = feature_df.apply(
@@ -220,7 +221,7 @@ elif selected == ":material/extension: Feature Adoption":
             SUM(total_elapsed_time)/1000/60/60 as total_hours,
             COUNT(DISTINCT user_name) as unique_users,
             AVG(execution_time)/1000 as avg_exec_sec
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where_clause}
         AND execution_status = 'SUCCESS'
         AND query_tag IS NOT NULL AND query_tag != ''
@@ -246,7 +247,7 @@ elif selected == ":material/extension: Feature Adoption":
             COUNT(DISTINCT schema_name) as schemas_used,
             COUNT(DISTINCT user_name) as unique_users,
             SUM(bytes_scanned)/1e12 as tb_scanned
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where_clause}
         AND execution_status = 'SUCCESS'
         AND database_name IS NOT NULL
@@ -269,15 +270,15 @@ elif selected == ":material/extension: Feature Adoption":
                 db_stats = db_usage.to_string()
                 tags_stats = tags_df.to_string() if not tags_df.empty else "No query tags in use"
 
-                prompt = """You are a Snowflake feature adoption expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake feature adoption expert analyzing query history data.
 Analyze these feature usage patterns.
 
 RECOMMENDATIONS SHOULD INCLUDE:
-1. Query tagging recommendations for better workload attribution and chargeback
-2. Features that could improve the workload (streams, tasks, dynamic tables)
+1. Query tagging recommendations for better workload attribution
+2. Features that could improve the workload
 3. External function usage patterns and alternatives
 4. Data sharing/data transfer optimization opportunities
-5. Governance improvements (resource monitors, access policies)"""
+5. Governance improvements"""
 
                 data_context = f"FEATURE ADOPTION:\n{feature_stats}\n\nDATABASE USAGE:\n{db_stats}\n\nQUERY TAGS:\n{tags_stats}"
                 suggestions = get_ai_suggestions(prompt, data_context)

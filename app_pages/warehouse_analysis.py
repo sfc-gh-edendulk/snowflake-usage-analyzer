@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from utils import execute_query, get_ai_suggestions, build_where_clause, to_pandas_native
+from utils import execute_query, get_ai_suggestions, build_where_clause, get_query_source, to_pandas_native
 from data import get_warehouse_summary, get_sizing_analysis, get_hourly_pattern, get_cluster_data
 
 where_clause = build_where_clause()
+source = get_query_source()
 
 st.title(":material/warehouse: Warehouse Analysis & Optimization")
 
@@ -19,7 +20,7 @@ selected = st.segmented_control(
 if selected == ":material/dashboard: Overview":
     st.subheader("Warehouse Summary")
 
-    wh_df = get_warehouse_summary(where_clause)
+    wh_df = get_warehouse_summary(where_clause, source)
 
     if not wh_df.empty:
         wh_plot = to_pandas_native(wh_df)
@@ -43,14 +44,14 @@ if selected == ":material/dashboard: Overview":
             with st.spinner("Analyzing warehouse patterns..."):
                 wh_stats = wh_df.to_string()
 
-                prompt = """You are a Snowflake warehouse optimization expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake warehouse optimization expert analyzing query history data.
 Analyze these warehouse usage patterns.
 
 RECOMMENDATIONS SHOULD INCLUDE:
 1. Identify warehouses with disproportionate queue time or spilling vs query volume
-2. Suggest warehouse consolidation opportunities (similar workloads, low utilization)
-3. Identify warehouses that may be over-provisioned (high query count but low exec time)
-4. Recommend warehouse specialization strategies (separate ETL from BI workloads)
+2. Suggest warehouse consolidation opportunities
+3. Identify warehouses that may be over-provisioned
+4. Recommend warehouse specialization strategies
 5. Cost optimization opportunities based on usage patterns"""
 
                 data_context = f"WAREHOUSE SUMMARY:\n{wh_stats}"
@@ -68,7 +69,7 @@ elif selected == ":material/straighten: Right-sizing":
     - Short query times with large warehouse → Consider downsizing
     """)
 
-    sizing_df = get_sizing_analysis(where_clause)
+    sizing_df = get_sizing_analysis(where_clause, source)
 
     if not sizing_df.empty:
         needs_attention = sizing_df[sizing_df['RECOMMENDATION'] != 'OK']
@@ -94,7 +95,7 @@ elif selected == ":material/straighten: Right-sizing":
                     ELSE '> 5min'
                 END as exec_bucket,
                 COUNT(*) as query_count
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            FROM {source}
             WHERE {where_clause}
             AND execution_status = 'SUCCESS'
             AND warehouse_size IS NOT NULL
@@ -113,15 +114,15 @@ elif selected == ":material/straighten: Right-sizing":
                 sizing_stats = sizing_df.to_string()
                 attention_stats = needs_attention.to_string() if not needs_attention.empty else "No warehouses need attention"
 
-                prompt = """You are a Snowflake warehouse sizing expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake warehouse sizing expert analyzing query history data.
 Analyze these right-sizing indicators.
 
 RECOMMENDATIONS SHOULD INCLUDE:
 1. Specific upsizing recommendations with target sizes for high-spilling warehouses
 2. Specific downsizing recommendations for under-utilized warehouses
-3. Queries that could be optimized instead of upsizing (JOINs, sorts, aggregations)
+3. Queries that could be optimized instead of upsizing
 4. Auto-suspend/auto-resume settings based on query patterns
-5. Consider workload isolation - separate long-running ETL from interactive queries"""
+5. Consider workload isolation"""
 
                 data_context = f"SIZING ANALYSIS:\n{sizing_stats}\n\nWAREHOUSES NEEDING ATTENTION:\n{attention_stats}"
                 suggestions = get_ai_suggestions(prompt, data_context)
@@ -131,7 +132,7 @@ RECOMMENDATIONS SHOULD INCLUDE:
 elif selected == ":material/insights: Utilization Patterns":
     st.subheader("Usage Patterns Over Time")
 
-    pattern_df = get_hourly_pattern(where_clause)
+    pattern_df = get_hourly_pattern(where_clause, source)
 
     if not pattern_df.empty:
         try:
@@ -151,7 +152,7 @@ elif selected == ":material/insights: Utilization Patterns":
                 DATE_TRUNC('day', start_time) as day,
                 warehouse_name,
                 COUNT(*) as query_count
-            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            FROM {source}
             WHERE {where_clause}
             AND execution_status = 'SUCCESS'
             AND warehouse_name IS NOT NULL
@@ -171,15 +172,15 @@ elif selected == ":material/insights: Utilization Patterns":
             with st.spinner("Analyzing usage patterns..."):
                 pattern_stats = pattern_df.to_string() if not pattern_df.empty else "No pattern data"
 
-                prompt = """You are a Snowflake workload optimization expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake workload optimization expert analyzing query history data.
 Analyze these usage patterns.
 
 RECOMMENDATIONS SHOULD INCLUDE:
-1. Identify peak usage hours and days - recommend scheduling batch jobs during off-peak
-2. Suggest auto-suspend timeout adjustments based on activity gaps
-3. Identify opportunities for serverless computing for sporadic workloads
-4. Recommend warehouse scheduling policies (scaling during peak, downsizing off-peak)
-5. Identify potential cost savings from shifting workloads to off-peak hours"""
+1. Identify peak usage hours and days
+2. Suggest auto-suspend timeout adjustments
+3. Identify opportunities for serverless computing
+4. Recommend warehouse scheduling policies
+5. Identify potential cost savings from shifting workloads"""
 
                 data_context = f"HOURLY/DAILY USAGE PATTERNS:\n{pattern_stats}"
                 suggestions = get_ai_suggestions(prompt, data_context)
@@ -189,7 +190,7 @@ RECOMMENDATIONS SHOULD INCLUDE:
 elif selected == ":material/hub: Multi-cluster Analysis":
     st.subheader("Multi-cluster Warehouse Analysis")
 
-    cluster_df = get_cluster_data(where_clause)
+    cluster_df = get_cluster_data(where_clause, source)
 
     max_cluster = cluster_df['CLUSTER_NUMBER'].max() if not cluster_df.empty else None
     if not cluster_df.empty and max_cluster is not None and max_cluster > 1:
@@ -217,7 +218,7 @@ elif selected == ":material/hub: Multi-cluster Analysis":
             SUM(queued_overload_time)/1000/60 as queue_overload_min,
             AVG(queued_overload_time)/1000 as avg_queue_sec,
             MAX(cluster_number) as max_clusters_used
-        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        FROM {source}
         WHERE {where_clause}
         AND execution_status = 'SUCCESS'
         AND warehouse_name IS NOT NULL
@@ -235,15 +236,15 @@ elif selected == ":material/hub: Multi-cluster Analysis":
                 candidate_stats = candidates.to_string()
                 cluster_stats = cluster_df.to_string() if not cluster_df.empty else "No cluster data"
 
-                prompt = """You are a Snowflake multi-cluster warehouse expert analyzing ACCOUNT_USAGE.QUERY_HISTORY data.
+                prompt = """You are a Snowflake multi-cluster warehouse expert analyzing query history data.
 Analyze these concurrency patterns.
 
 RECOMMENDATIONS SHOULD INCLUDE:
-1. Specific multi-cluster configurations (min/max clusters, scaling policy)
-2. Economy vs Standard scaling mode recommendations based on workload patterns
-3. Identify if queue time is from concurrency (multi-cluster helps) or query complexity (upsizing helps)
-4. Resource monitor recommendations to control costs with multi-cluster
-5. Alternatives to multi-cluster (query optimization, workload scheduling)"""
+1. Specific multi-cluster configurations
+2. Economy vs Standard scaling mode recommendations
+3. Identify if queue time is from concurrency or query complexity
+4. Resource monitor recommendations
+5. Alternatives to multi-cluster"""
 
                 data_context = f"MULTI-CLUSTER CANDIDATES:\n{candidate_stats}\n\nCURRENT CLUSTER USAGE:\n{cluster_stats}"
                 suggestions = get_ai_suggestions(prompt, data_context)
